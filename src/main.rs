@@ -1,39 +1,38 @@
-//! Blinks the LED on a Pico board
+//! Rainbow effect color wheel using the onboard NeoPixel on an Adafruit Feather RP2040 board
 //!
-//! This will blink an LED attached to GP25, which is the pin the Pico uses for the on-board LED.
+//! This flows smoothly through various colors on the onboard NeoPixel.
+//! Uses the `ws2812_pio` driver to control the NeoPixel, which in turns uses the
+//! RP2040's PIO block.
 #![no_std]
 #![no_main]
 
-use bsp::entry;
-use defmt::*;
-use defmt_rtt as _;
-use embedded_hal::digital::v2::OutputPin;
-use panic_probe as _;
-
-// Provide an alias for our BSP so we can switch targets quickly.
-// Uncomment the BSP you included in Cargo.toml, the rest of the code does not need to change.
-use rp_pico as bsp;
-// use sparkfun_pro_micro_rp2040 as bsp;
-
-use bsp::hal::{
-    clocks::{init_clocks_and_plls, Clock},
-    pac,
-    sio::Sio,
-    watchdog::Watchdog,
+use adafruit_feather_rp2040::entry;
+use adafruit_feather_rp2040::{
+    hal::{
+        clocks::{init_clocks_and_plls, Clock},
+        pac,
+        pio::PIOExt,
+        timer::Timer,
+        watchdog::Watchdog,
+        Sio,
+    },
+    Pins, XOSC_CRYSTAL_FREQ,
 };
+use core::iter::once;
+use embedded_hal::timer::CountDown;
+use fugit::ExtU32;
+use panic_halt as _;
+use smart_leds::{brightness, SmartLedsWrite, RGB8};
+use ws2812_pio::Ws2812;
 
 #[entry]
 fn main() -> ! {
-    info!("Program start");
     let mut pac = pac::Peripherals::take().unwrap();
-    let core = pac::CorePeripherals::take().unwrap();
-    let mut watchdog = Watchdog::new(pac.WATCHDOG);
-    let sio = Sio::new(pac.SIO);
 
-    // External high-speed crystal on the pico board is 12Mhz
-    let external_xtal_freq_hz = 12_000_000u32;
+    let mut watchdog = Watchdog::new(pac.WATCHDOG);
+
     let clocks = init_clocks_and_plls(
-        external_xtal_freq_hz,
+        XOSC_CRYSTAL_FREQ,
         pac.XOSC,
         pac.CLOCKS,
         pac.PLL_SYS,
@@ -44,25 +43,54 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
-
-    let pins = bsp::Pins::new(
+    let sio = Sio::new(pac.SIO);
+    let pins = Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
         &mut pac.RESETS,
     );
 
-    let mut led_pin = pins.led.into_push_pull_output();
+    let timer = Timer::new(pac.TIMER, &mut pac.RESETS);
+    let mut delay = timer.count_down();
 
+    // Configure the addressable LED
+    let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+    let mut ws = Ws2812::new(
+        // The onboard NeoPixel is attached to GPIO pin #16 on the Feather RP2040.
+        pins.neopixel.into_mode(),
+        &mut pio,
+        sm0,
+        clocks.peripheral_clock.freq(),
+        timer.count_down(),
+    );
+
+    // Infinite colour wheel loop
+    let mut n: u8 = 128;
     loop {
-        info!("on!");
-        led_pin.set_high().unwrap();
-        delay.delay_ms(500);
-        info!("off!");
-        led_pin.set_low().unwrap();
-        delay.delay_ms(500);
+        ws.write(brightness(once(wheel(n)), 32)).unwrap();
+        n = n.wrapping_add(1);
+
+        delay.start(25.millis());
+        let _ = nb::block!(delay.wait());
     }
 }
 
-// End of file
+/// Convert a number from `0..=255` to an RGB color triplet.
+///
+/// The colours are a transition from red, to green, to blue and back to red.
+fn wheel(mut wheel_pos: u8) -> RGB8 {
+    wheel_pos = 255 - wheel_pos;
+    if wheel_pos < 85 {
+        // No green in this sector - red and blue only
+        (255 - (wheel_pos * 3), 0, wheel_pos * 3).into()
+    } else if wheel_pos < 170 {
+        // No red in this sector - green and blue only
+        wheel_pos -= 85;
+        (0, wheel_pos * 3, 255 - (wheel_pos * 3)).into()
+    } else {
+        // No blue in this sector - red and green only
+        wheel_pos -= 170;
+        (wheel_pos * 3, 255 - (wheel_pos * 3), 0).into()
+    }
+}
