@@ -20,6 +20,11 @@ fugit = "0.3.6"
 smart-leds = "0.3.0"
 ws2812-pio = "0.5.0"
 nb = "1.0.0"
+hd44780-driver = { version = "0.4", git = "https://github.com/mhampson31/hd44780-driver" }
+ds1307 = "0.5.0"
+shared-bus = { version = "0.2.5", features = ["cortex-m"] }
+ufmt = "0.2.0"
+heapless = { version = "0.7.16", features = ["ufmt-impl"] }
 
 # but you can use any BSP. Uncomment this to use the pro_micro_rp2040 BSP instead
 # sparkfun-pro-micro-rp2040 = "0.3"

@@ -14,6 +14,7 @@ use adafruit_feather_rp2040::{
         i2c::I2C,
         pac,
         pio::PIOExt,
+        pwm,
         timer::Timer,
         watchdog::Watchdog,
         Sio,
@@ -22,15 +23,18 @@ use adafruit_feather_rp2040::{
 };
 use core::iter::once;
 use cortex_m::delay::Delay;
+use ds1307::{Ds1307, Rtcc, Timelike};
 use embedded_hal::timer::CountDown;
-
+use embedded_hal::PwmPin;
 use fugit::{ExtU32, RateExtU32};
 use hd44780_driver::{Cursor, CursorBlink, Display, DisplayMode, HD44780};
+use heapless::String;
 use panic_halt as _;
 use smart_leds::{brightness, SmartLedsWrite, RGB8};
+use ufmt::uwrite;
 use ws2812_pio::Ws2812;
 
-const I2C_ADDRESS: u8 = 0x20;
+const LCD_I2C_ADDRESS: u8 = 0x20;
 
 #[entry]
 fn main() -> ! {
@@ -65,7 +69,7 @@ fn main() -> ! {
     // Create the I²C drive, using the two pre-configured pins. This will fail
     // at compile time if the pins are in the wrong mode, or if this I²C
     // peripheral isn't available on these pins!
-    let mut i2c = I2C::i2c1(
+    let i2c = I2C::i2c1(
         pac.I2C1,
         sda_pin,
         scl_pin,
@@ -73,6 +77,14 @@ fn main() -> ! {
         &mut pac.RESETS,
         &clocks.system_clock,
     );
+
+    let bus = shared_bus::BusManagerSimple::new(i2c);
+
+    let mut rtc_proxy = bus.acquire_i2c();
+    let mut lcd_proxy = bus.acquire_i2c();
+
+    // DS1307 RTC
+    let mut rtc = Ds1307::new(rtc_proxy);
 
     let timer = Timer::new(pac.TIMER, &mut pac.RESETS);
     let mut neopixel_delay = timer.count_down();
@@ -92,24 +104,68 @@ fn main() -> ! {
     let mut n: u8 = 128;
 
     // LCD setup
-
     let mut lcd_delay = Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+    let mut pwm_slices = pwm::Slices::new(pac.PWM, &mut pac.RESETS);
 
-    let mut lcd = HD44780::new_i2c_mcp23008(i2c, I2C_ADDRESS, &mut lcd_delay).unwrap();
+    // PWM for the LCD backlight
+    // Right now we're plugged into PWM slice 6, using both channels
+    let pwm = &mut pwm_slices.pwm6;
+    pwm.set_ph_correct();
+    pwm.enable();
+
+    let channel_a = &mut pwm.channel_a;
+    channel_a.output_to(pins.a2);
+    channel_a.set_duty(10000);
+
+    let channel_b = &mut pwm.channel_b;
+    channel_b.output_to(pins.a3);
+    channel_b.set_duty(10000);
+
+    // The LCD itself
+    let mut lcd = HD44780::new_i2c_mcp23008(lcd_proxy, LCD_I2C_ADDRESS, &mut lcd_delay).unwrap();
     lcd.reset(&mut lcd_delay).expect("Could not reset display");
     lcd.clear(&mut lcd_delay).expect("Could not clear display");
     lcd.set_display_mode(
         DisplayMode {
             display: Display::On,
-            cursor_visibility: Cursor::Visible,
-            cursor_blink: CursorBlink::On,
+            cursor_visibility: Cursor::Invisible,
+            cursor_blink: CursorBlink::Off,
         },
         &mut lcd_delay,
     )
     .expect("Could not set display mode");
-    let _ = lcd.write_str("Hello, world!", &mut lcd_delay);
+    lcd.write_str("Hello, world!", &mut lcd_delay)
+        .expect("Could not write to LCD.");
+    lcd.set_cursor_xy((0, 1), &mut lcd_delay)
+        .expect("Could not update cursor position.");
 
     loop {
+        let mut time_display: String<16> = String::new();
+        let time = rtc.time().expect("Could not get time from RTC.");
+        let (pm, hour) = time.hour12();
+
+        if hour < 10 {
+            uwrite!(time_display, "{}", " ");
+        };
+        uwrite!(time_display, "{}:", hour);
+
+        if time.minute() < 10 {
+            uwrite!(time_display, "{}", "0");
+        };
+        uwrite!(time_display, "{} ", time.minute());
+
+        uwrite!(
+            time_display,
+            "{}",
+            match pm {
+                true => "PM",
+                false => "AM",
+            }
+        );
+
+        lcd.clear(&mut lcd_delay).expect("Could not clear display");
+
+        lcd.write_str(&time_display, &mut lcd_delay);
         ws.write(brightness(once(wheel(n)), 32)).unwrap();
         n = n.wrapping_add(1);
 
